@@ -37,6 +37,24 @@ class BatchIn(BaseModel):
     operations: List[Operation] = Field(min_length=1)
 
 
+class PreflightIn(BaseModel):
+    """提交前预检（只读，不落库、不递增修订号）：沿用正式批次的
+    expected_revision / operations 语义，并指定允许额外撤回的生效旧证据数上限。
+
+    服务在该修订号对应的同一正式视图中先按原批次语义处理新增与撤回；
+    若处理后仍冲突，寻找不含本批新增证据、也不与本批撤回重复的最少额外撤回集合。
+    """
+
+    expected_revision: int = Field(ge=0, description="当前修订号；不一致则按 STALE_REVISION 拒绝")
+    operations: List[Operation] = Field(min_length=1)
+    extra_retraction_budget: int = Field(
+        default=0,
+        ge=0,
+        le=3,
+        description="可额外撤回的生效旧证据数上限（0～3，默认 0）",
+    )
+
+
 class SnapshotIn(BaseModel):
     label: Optional[str] = Field(default=None, max_length=256, description="版本备注")
 

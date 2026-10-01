@@ -5,10 +5,10 @@ from typing import Optional
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
-from . import changes, db, packages as packages_svc, projections, service
+from . import changes, db, packages as packages_svc, preflight as preflight_svc, projections, service
 from .derivation import RELATION_LABELS
 from .errors import ApiError
-from .models import BatchIn, PackageIn, ProjectionBatchIn, ProjectionIn, SnapshotIn, StratumIn
+from .models import BatchIn, PackageIn, PreflightIn, ProjectionBatchIn, ProjectionIn, SnapshotIn, StratumIn
 
 
 @asynccontextmanager
@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="考古地层关系核验服务",
-    version="1.3.0",
+    version="1.4.0",
     description=(
         "登记遗址地层与带唯一证据编号的“同一期 / 早于”断言；"
         "同一期可传递，早于沿同一期与早于路径推导；"
@@ -88,6 +88,24 @@ def list_strata():
 def post_batch(batch: BatchIn):
     """提交一批断言新增/撤回。整批核验，成功则原子递增修订号。"""
     return service.apply_batch(batch)
+
+
+@app.post("/batches/preflight", tags=["batches"])
+def post_batch_preflight(batch: PreflightIn):
+    """提交前只读预检（不生成修订、变化记录或断言，原状态不变）。
+
+    沿用正式批次的 expected_revision / operations 语义先处理新增与撤回，
+    再在 extra_retraction_budget（0～3）限定的生效旧证据范围内，寻找不含本批
+    新增证据、也不重复本批撤回的最少额外撤回集合（并列按证据编号序列字典序最小）；
+    修订号过期、证据编号占用、撤回目标无效等沿用正式批次的拒绝语义。
+
+    返回 resolution：
+    - `already_consistent`：原批次本可通过，额外撤回集合为空，passed=true；
+    - `extra_retractions_found`：给出最少额外撤回集合及应用后是否通过核验；
+    - `unfixable_new_assertions`：本批保留的新断言自身矛盾，无法靠撤回旧证据修复；
+    - `budget_insufficient`：预算内无解；后两种均附当前仍存在的冲突证据路径。
+    """
+    return preflight_svc.preflight_batch(batch)
 
 
 @app.get("/revision", tags=["batches"])

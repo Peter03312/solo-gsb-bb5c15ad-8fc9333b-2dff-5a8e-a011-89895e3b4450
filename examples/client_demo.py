@@ -46,15 +46,18 @@ def main() -> None:
     show("查询 L1 vs L4", requests.get(f"{BASE}/relationship", params={"a": "L1", "b": "L4"}))
 
     # 4. 冲突：L4 早于 L1 形成闭环 -> 整批拒绝，原状态不变
-    r = requests.post(
-        f"{BASE}/batches",
-        json={
-            "expected_revision": rev,
-            "operations": [
-                {"op": "assert", "evidence_id": "EV-004", "stratum_a": "L4", "stratum_b": "L1", "relation": "earlier_than"}
-            ],
-        },
+    conflict_batch = {
+        "expected_revision": rev,
+        "operations": [
+            {"op": "assert", "evidence_id": "EV-004", "stratum_a": "L4", "stratum_b": "L1", "relation": "earlier_than"}
+        ],
+    }
+    # 4a. 提交前先做只读预检：预算 1 内寻找消除闭环所需撤回的最少旧证据
+    show(
+        "预检：撤哪条旧证据可让冲突批次通过（只读，不改状态）",
+        requests.post(f"{BASE}/batches/preflight", json={**conflict_batch, "extra_retraction_budget": 1}),
     )
+    r = requests.post(f"{BASE}/batches", json=conflict_batch)
     show("冲突批次（被拒绝）", r)
 
     # 5. 定版
