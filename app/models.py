@@ -64,3 +64,15 @@ class ProjectionBatchIn(BaseModel):
 
     expected_revision: int = Field(ge=0, description="该推演当前修订号；不一致则整批拒绝")
     operations: List[Operation] = Field(min_length=1)
+
+
+class BatchPreflightIn(BatchIn):
+    """批次提交预检（只读，不生成修订/变化记录/断言）。
+
+    expected_revision / operations 与正式批次完全一致并按同一语义模拟；
+    extra_retract_budget 指定允许额外撤回的、本批应用后仍生效的旧证据数上限（0~3）。
+    """
+
+    extra_retract_budget: int = Field(
+        ge=0, le=3, description="可额外撤回的生效旧证据数上限（0~3）"
+    )

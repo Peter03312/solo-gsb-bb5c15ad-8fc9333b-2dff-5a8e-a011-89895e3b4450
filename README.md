@@ -13,6 +13,13 @@
   2. **早于闭环禁止**——等价类之间的早于关系不得成环。
 - **批次语义**：每批新增/撤回须携带当前修订号；按整批应用后的最终关系核验；
   发生矛盾时**整批拒绝**并返回冲突证据路径，原状态不变；全部通过则在同一事务内落库并**原子递增修订号**。
+- **提交前预检（只读）**：`POST /batch-preflight` 沿用正式批次的
+  `expected_revision`、`operations`，并指定可额外撤回的生效旧证据数上限
+  `extra_retract_budget`（0～3）；在同一正式视图中先按原批次语义模拟新增与撤回，
+  再求解消除冲突所需的**最少额外撤回集合**（不含本批新增证据、不重复本批撤回；
+  并列时按证据编号序列字典序最小）。原批次已可通过返回空集合；本批保留的新断言
+  自身矛盾时说明无法靠撤回旧证据修复；预算内无解时说明预算不足；后两者附当前冲突
+  证据路径。预检**不生成修订、变化记录或断言**，正式状态不变。
 - **路径选取**：多条证据路径时，取证据数最少者；并列时按证据编号序列字典序最小者。
 - **定版（快照）**：保存当前修订号下全部关系结论的不可变快照；后续撤回不影响旧版结论。
 - **专题成果包**：把某定版中的一组（≥2、不重复、已登记）地层封存为不可变、可转交
@@ -65,6 +72,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | POST | `/strata` | 登记地层 `{stratum_id, site?}` |
 | GET | `/strata` | 地层列表 |
 | POST | `/batches` | 提交一批断言新增/撤回（整批核验，成功原子递增修订号） |
+| POST | `/batch-preflight` | 批次提交预检（只读）：求解消除冲突所需的最少额外旧证据撤回（预算 0～3） |
 | GET | `/revision` | 当前修订号 |
 | GET | `/assertions?status=active` | 断言列表 |
 | GET | `/revision-changes?limit=100&cursor=...` | 游标分页追踪各正式修订前后关系/最优路径变化 |
@@ -111,6 +119,68 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
     }
   }
 }
+```
+
+### 批次提交预检（只读）：`POST /batch-preflight`
+
+考古人员在正式提交前可先预检：若本批会引发冲突，最少还需要额外撤回哪些
+**生效中的旧证据**才能通过整批核验。预检在 `REPEATABLE READ READ ONLY`
+快照事务中完成，**不生成修订、不写变化记录或断言**，正式状态不变。
+
+请求体与正式批次一致（`expected_revision`、`operations` 语义、字段均不变），
+额外携带预算：
+
+```json
+{
+  "expected_revision": 1,
+  "extra_retract_budget": 1,
+  "operations": [
+    {"op": "assert", "evidence_id": "EV-009", "stratum_a": "L3", "stratum_b": "L1", "relation": "earlier_than"}
+  ]
+}
+```
+
+处理口径：
+
+1. 在该修订号对应的同一正式视图中，**先按原批次语义模拟**整批新增与撤回；
+   修订号过期、证据编号占用（含已撤回）、撤回目标不存在或已撤回、引用未登记
+   地层等**沿用正式批次的拒绝语义**（同样的 HTTP 状态码与错误码，预检不落任何状态）；
+2. 模拟后若已无冲突 → `already_passes`，额外撤回集合为空；
+3. 否则搜索额外撤回集合，且每条撤回只能取自**本批应用后仍生效的旧证据**：
+   不包含本批新增证据（含新增后又在本批撤回的编号），也不重复本批已撤回的证据；
+4. 解的选取：撤回数**最少**；数量并列时按证据编号序列**字典序最小**；
+5. 本批最终保留的新断言**自身**核验即矛盾（仅由新证据构成的组内早于 / 闭环）
+   → `internal_contradiction`：撤回旧证据不可能修复，只能修改本批；
+6. 预算（0～3，越界返回 422）内找不到任何方案 → `budget_exceeded`；
+   第 5、6 种情况均附当前（本批模拟应用后）仍存在的冲突证据路径。
+
+响应示例：
+
+```json
+{
+  "expected_revision": 1,
+  "current_revision": 1,
+  "extra_retract_budget": 1,
+  "result": "solution_found",
+  "message": "在预算内找到最少额外撤回集合，应用后关系核验通过",
+  "extra_retractions": ["EV-001"],
+  "extra_retractions_count": 1,
+  "validation_passed": true,
+  "conflicts": []
+}
+```
+
+- `result`：`already_passes`（原批次已通过，空集合）/ `solution_found`（预算内
+  找到最少集合，`validation_passed=true`）/ `internal_contradiction`
+  （新断言自身矛盾）/ `budget_exceeded`（预算内无解）；
+- `conflicts` 仅在失败结果下出现，结构与正式批次 `CONFLICT` 响应中的
+  `conflicts[]` 一致（`type` / `message` / `evidence_path`）；
+- 预检只给建议：拿到 `solution_found` 后，把 `extra_retractions` 作为
+  `{"op":"retract", ...}` 操作并入原批次（仍带原 `expected_revision`）提交即可；
+  若期间正式修订号已推进，正式批次会照常以 `STALE_REVISION` 拒绝。
+
+```bash
+bash examples/preflight_demo.sh
 ```
 
 ### 关系查询响应
@@ -407,6 +477,13 @@ bash examples/packages_demo.sh
 bash examples/demo.sh
 ```
 
+批次提交预检演示（只读求解最少额外撤回：已通过 / 找到方案 / 新断言自相矛盾 /
+预算不足 / 拒绝语义沿用 / 预检不落任何状态）：
+
+```bash
+bash examples/preflight_demo.sh
+```
+
 推演（沙盘）端到端演示（创建固定基线、推演批次、关系查询、并入成功与三类并入失败、
 净变更为空只关闭、放弃推演）：
 
@@ -441,6 +518,7 @@ python3 examples/client_demo.py
 app/
   main.py         # FastAPI 路由与错误处理
   service.py      # 正式批次核验、关系查询、定版快照
+  preflight.py    # 批次提交预检（只读）：模拟本批 + 最少额外旧证据撤回搜索
   packages.py     # 专题成果包：定版地层关系封存（冻结、集合幂等、不可变、可转交复核）
   projections.py  # 推演（沙盘）：创建固定基线、推演批次、关系查询、并入核验
   changes.py      # 正式修订变化追踪：前后差异计算、游标分页、启动历史回填
@@ -449,6 +527,7 @@ app/
   models.py       # 请求模型
 examples/
   demo.sh           # curl 端到端示例（批次/查询/冲突/撤回/定版）
+  preflight_demo.sh # 批次提交预检示例（只读求解最少额外撤回、四类结果、拒绝语义）
   projection_demo.sh # 推演端到端示例（沙盘批次、并入成功与三类失败、空净变更）
   changes_demo.sh  # 修订变化追踪示例（变化/路径改变/失败批次/并入/游标分页）
   packages_demo.sh # 专题成果包示例（封存/幂等/不可变/拒绝分支）
